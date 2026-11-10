@@ -1,12 +1,14 @@
+mod miniapp;
 mod weekly;
 
 use chrono::Utc;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
 use std::{env, error::Error, fmt, path::PathBuf, thread, time::Duration};
 use weekly::{Destination, Weekly};
 
-type Result<T> = std::result::Result<T, Box<dyn Error>>;
+type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Debug)]
 struct ApiError {
@@ -24,7 +26,7 @@ impl fmt::Display for ApiError {
 
 impl Error for ApiError {}
 
-type Call<'a> = dyn Fn(&str, Value) -> Result<Value> + 'a;
+type Call<'a> = dyn Fn(&str, Value) -> Result<Value> + Send + Sync + 'a;
 
 fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> Result<()> {
     let now = Utc::now();
@@ -47,7 +49,7 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
     let command = command.to_ascii_lowercase();
     if !matches!(
         command.as_str(),
-        "/help" | "/start" | "/weekly" | "/plan" | "/lunch"
+        "/help" | "/start" | "/weekly" | "/plan" | "/lunch" | "/pizza"
     ) {
         return Ok(());
     }
@@ -72,6 +74,9 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
         Some("group" | "supergroup")
     ) {
         return reply("Add me to your pizza group and use this command there.");
+    }
+    if command == "/pizza" {
+        return weekly.send_mini_app(destination, call);
     }
     if command == "/weekly" {
         if let Some(owner) = message["from"]["id"]
@@ -127,7 +132,7 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
 
 fn run() -> Result<()> {
     let token = env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default();
-    let token = token.trim();
+    let token = token.trim().to_owned();
     let valid_token = token.split_once(':').is_some_and(|(id, secret)| {
         !id.is_empty()
             && id.bytes().all(|b| b.is_ascii_digit())
@@ -148,9 +153,10 @@ fn run() -> Result<()> {
     let mut weekly = Weekly::load(path, zone)?;
 
     let client = Client::builder().timeout(Duration::from_secs(45)).build()?;
-    let call = |method: &str, body: Value| -> Result<Value> {
+    let api_token = token.clone();
+    let call: Arc<Call> = Arc::new(move |method: &str, body: Value| -> Result<Value> {
         let result: Value = client
-            .post(format!("https://api.telegram.org/bot{token}/{method}"))
+            .post(format!("https://api.telegram.org/bot{api_token}/{method}"))
             .json(&body)
             .send()
             .and_then(|response| response.json())
@@ -164,24 +170,44 @@ fn run() -> Result<()> {
             description: result["description"].as_str().unwrap_or_default().into(),
             retry_after: result["parameters"]["retry_after"].as_u64().unwrap_or(5),
         }))
-    };
+    });
     let me = call("getMe", json!({}))?;
     let username = me["username"]
         .as_str()
         .ok_or("Telegram returned no bot username")?;
-    call(
-        "setMyCommands",
-        json!({"commands":[
-            {"command":"weekly","description":"Start the weekly pizza poll"},
-            {"command":"plan","description":"Poll the group for available pizza times"},
-            {"command":"lunch","description":"Post pizza meetup details and collect RSVPs"},
-            {"command":"help","description":"Show pizza bot examples"}
-        ]}),
-    )?;
+    let mut commands = vec![
+        json!({"command":"weekly","description":"Start the weekly pizza poll"}),
+        json!({"command":"plan","description":"Poll the group for available pizza times"}),
+        json!({"command":"lunch","description":"Post pizza meetup details and collect RSVPs"}),
+        json!({"command":"help","description":"Show pizza bot examples"}),
+    ];
+    let app = env::var("PIZZA_MINI_APP_SHORT_NAME").unwrap_or_default();
+    if !app.is_empty() {
+        if !(3..=30).contains(&app.len())
+            || !app.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err("Invalid PIZZA_MINI_APP_SHORT_NAME.".into());
+        }
+        weekly.enable_mini_app(format!("https://t.me/{username}/{app}"));
+        commands.insert(
+            0,
+            json!({"command":"pizza","description":"Open the Pizza Lunch Mini App"}),
+        );
+    }
+    call("setMyCommands", json!({"commands": commands}))?;
+    let weekly = Arc::new(Mutex::new(weekly));
+    if !app.is_empty() {
+        let address = env::var("PIZZA_MINI_APP_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".into());
+        miniapp::serve(&address, token, Arc::clone(&weekly), Arc::clone(&call))?;
+    }
     println!("Listening as @{username}. Press Ctrl-C to stop.");
     let mut offset = 0;
     loop {
-        if let Err(error) = weekly.tick(Utc::now(), &call) {
+        if let Err(error) = weekly
+            .lock()
+            .map_err(|_| "Weekly state lock failed")?
+            .tick(Utc::now(), &*call)
+        {
             eprintln!("Weekly update failed: {error}");
         }
         let updates = match call(
@@ -208,7 +234,12 @@ fn run() -> Result<()> {
             .as_array()
             .ok_or("Telegram returned an invalid update list")?
         {
-            if let Err(error) = handle(update, username, &mut weekly, &call) {
+            if let Err(error) = handle(
+                update,
+                username,
+                &mut *weekly.lock().map_err(|_| "Weekly state lock failed")?,
+                &*call,
+            ) {
                 eprintln!("{error}");
             }
             offset = update["update_id"].as_i64().ok_or("Missing update ID")? + 1;

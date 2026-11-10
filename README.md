@@ -32,6 +32,17 @@ uses the same buttons and message IDs, so an open poll can continue in place.
 To roll back, stop Rust and start the previous JavaScript version with the same
 settings. Run only one version at a time.
 
+## Find the bot commands in Telegram
+
+Once the bot has started, type `/` in the group message field to see
+Telegram's command suggestions. Select the entry for your Pizza Lunch Bot.
+
+- `/weekly` starts the recurring pizza poll.
+- `/plan` creates a one-off availability poll. Add times separated by `|`.
+- `/lunch` creates a one-off RSVP poll. Add the date, time, and place.
+- `/help` shows examples. In a group you can also send `/help@your_bot`
+  using the bot's actual username.
+
 ## Start the weekly cycle
 
 Send `/weekly@your_bot` in your group once, replacing `your_bot` with
@@ -118,3 +129,27 @@ version without the `v` prefix, such as `ghcr.io/eckphi/pizza-lunch-bot:0.1.0`.
 Once that succeeds, the workflow creates a GitHub Release with generated
 notes and the image reference. Use the version tag in deployments and
 create a new version for subsequent changes.
+
+## Telegram Mini App
+
+The optional Pizza Lunch Mini App shows selectable day tiles, the confirmed
+lunch, and the RSVP list. The organizer gets time controls on the same screen.
+The Mini App and the Telegram poll use the same saved state.
+
+1. Run the bot with `PIZZA_MINI_APP_SHORT_NAME` set to the Mini App short
+   name you plan to register (for example, `pizza`). The Rust process serves
+   the app at port 8080 by default. For Docker, add
+   `--env PIZZA_MINI_APP_SHORT_NAME=pizza --publish 127.0.0.1:8080:8080`
+   to the run command. For a local process behind a proxy, you can set
+   `PIZZA_MINI_APP_LISTEN=127.0.0.1:8080`.
+2. Put an HTTPS reverse proxy in front of that port and serve the app at the
+   root of its domain. In BotFather, use `/newapp` to register that HTTPS
+   URL and the matching short name for your bot.
+3. Make the bot an administrator in the Telegram group so Telegram can verify
+   each Mini App user's membership. Start the weekly cycle with `/weekly`.
+   Tap **🍕 Open Pizza Lunch** on the card, or send `/pizza@your_bot`.
+
+For Runtipi, an HTTPS route to container port 8080 and the Mini App short
+name environment variable must be configured. The original headless store
+entry uses Telegram buttons only. If the short name is unset, the bot runs
+without the HTTP server.

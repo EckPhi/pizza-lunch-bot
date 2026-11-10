@@ -293,10 +293,15 @@ fn button(text: impl AsRef<str>, action: &str, index: usize) -> Value {
     json!({"text": text.as_ref(), "callback_data": format!("weekly:{action}:{index}")})
 }
 
+fn mini_button(link: &str, chat_id: i64) -> Value {
+    json!({"text":"🍕 Open Pizza Lunch", "url":format!("{link}?startapp={chat_id}")})
+}
+
 pub struct Weekly {
     path: PathBuf,
     zone: Tz,
     cycles: BTreeMap<i64, Cycle>,
+    mini_app: Option<String>,
 }
 
 impl Weekly {
@@ -317,7 +322,108 @@ impl Weekly {
                 return Err(format!("Invalid weekly state for chat {key}").into());
             }
         }
-        Ok(Self { path, zone, cycles })
+        Ok(Self {
+            path,
+            zone,
+            cycles,
+            mini_app: None,
+        })
+    }
+
+    pub fn enable_mini_app(&mut self, link: String) {
+        self.mini_app = Some(link);
+        for cycle in self.cycles.values_mut() {
+            cycle.dirty = true;
+        }
+    }
+
+    pub fn send_mini_app(&self, destination: Destination, call: &Call) -> Result<()> {
+        let Some(link) = &self.mini_app else {
+            call("sendMessage", destination.body(json!({"text":"The pizza Mini App is not configured. Use the buttons on the weekly poll."})))?;
+            return Ok(());
+        };
+        let text = if self.cycles.contains_key(&destination.chat_id) {
+            "🍕 Open Pizza Lunch to see this week's plan."
+        } else {
+            "🍕 Start the weekly poll first with /weekly."
+        };
+        call("sendMessage", destination.body(json!({
+            "text":text, "reply_markup":{"inline_keyboard":[[mini_button(link, destination.chat_id)]]}
+        })))?;
+        Ok(())
+    }
+
+    pub fn mini_view(&self, key: i64, user: &Value, now: DateTime<Utc>) -> Option<Value> {
+        let cycle = self.cycles.get(&key)?;
+        let person = user["id"].as_i64()?.to_string();
+        let now = self.wall_clock(now).timestamp_millis();
+        let voting = cycle.phase == Phase::Vote && now < cycle.cutoff;
+        let rsvp = cycle.phase == Phase::Lunch && now < cycle.start_at(&cycle.time) + HOUR;
+        let totals = cycle.totals();
+        let selections = cycle.votes.get(&person);
+        let options: Vec<_> = DAYS
+            .iter()
+            .enumerate()
+            .map(|(index, day)| {
+                json!({
+                    "label": day, "date": cycle.date(index as i64 + 1), "count": totals[index],
+                    "selected": selections.is_some_and(|days| days.contains(&index)),
+                })
+            })
+            .collect();
+        let responses: Vec<_> = STATUSES.iter().enumerate().map(|(index, status)| {
+            let names: Vec<_> = cycle.rsvps.values().filter(|r| r.index == index).map(|r| &r.name).collect();
+            json!({"label":status, "count":names.len(), "names":names.iter().take(15).collect::<Vec<_>>()})
+        }).collect();
+        let lunch = cycle
+            .day
+            .filter(|_| matches!(cycle.phase, Phase::Lunch | Phase::Done))
+            .map(|index| {
+                let unavailable: Vec<_> = cycle
+                    .votes
+                    .iter()
+                    .filter(|(_, days)| !days.is_empty() && !days.contains(&index))
+                    .filter_map(|(person, _)| cycle.voter_names.get(person))
+                    .take(15)
+                    .collect();
+                json!({"day":DAYS[index], "date":cycle.date(index as i64 + 1), "time":cycle.time,
+                "responses":responses, "unavailable":unavailable,
+                "selected":cycle.rsvps.get(&person).map(|response| response.index),
+                "times":if rsvp && cycle.owner == person { TIMES.to_vec() } else { vec![] }})
+            });
+        Some(
+            json!({"message":cycle.message, "voting":voting, "rsvp":rsvp,
+            "deadline":format!("Mon {} · 20:00 ({})", cycle.date(0), self.zone),
+            "options":options, "lunch":lunch}),
+        )
+    }
+
+    pub fn mini_select(
+        &mut self,
+        key: i64,
+        message: i64,
+        selection: (&str, usize),
+        user: &Value,
+        now: DateTime<Utc>,
+        call: &Call,
+    ) -> Result<String> {
+        let now = self.wall_clock(now).timestamp_millis();
+        let Some(cycle) = self
+            .cycles
+            .get_mut(&key)
+            .filter(|cycle| cycle.message == Some(message))
+        else {
+            return Ok("This poll has changed. Check the latest plan.".into());
+        };
+        let (changed, confirmation) = cycle.select(selection.0, selection.1, user, now);
+        if changed {
+            cycle.dirty = true;
+            self.save()?;
+            if let Err(error) = self.render(key, call) {
+                eprintln!("Could not refresh the Telegram card: {error}");
+            }
+        }
+        Ok(confirmation)
     }
 
     fn save(&self) -> Result<()> {
@@ -377,6 +483,12 @@ impl Weekly {
             return Ok(());
         }
         let mut card = cycle.card(self.zone);
+        if let Some(link) = &self.mini_app
+            && matches!(cycle.phase, Phase::Vote | Phase::Lunch)
+            && let Some(rows) = card["reply_markup"]["inline_keyboard"].as_array_mut()
+        {
+            rows.insert(0, json!([mini_button(link, key)]));
+        }
         if let Some(message) = cycle.message {
             card["chat_id"] = cycle.destination.chat_id.into();
             card["message_id"] = message.into();
@@ -472,7 +584,7 @@ impl Weekly {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, time::SystemTime};
+    use std::{sync::Mutex, time::SystemTime};
 
     #[test]
     fn resumes_javascript_poll_and_rolls_to_next_week() -> Result<()> {
@@ -503,14 +615,24 @@ mod tests {
             }))?,
         )?;
         let mut weekly = Weekly::load(path.clone(), chrono_tz::Europe::Vienna)?;
-        let calls = RefCell::new(Vec::new());
+        let calls = Mutex::new(Vec::new());
         let call = |method: &str, body: Value| -> Result<Value> {
-            calls.borrow_mut().push((method.to_owned(), body));
+            calls.lock().unwrap().push((method.to_owned(), body));
             Ok(json!({"message_id": 6}))
         };
-        let last = || calls.borrow().last().unwrap().clone();
+        let last = || calls.lock().unwrap().last().unwrap().clone();
+        let ada = json!({"id":1, "first_name":"Ada"});
+        let before = at("2026-11-16T18:59:59Z");
+        let view = weekly.mini_view(-1, &ada, before).unwrap();
+        assert_eq!(view["options"][1]["selected"], true);
+        assert_eq!(view["options"][3]["selected"], true);
+        assert!(
+            weekly
+                .mini_select(-1, 4, ("day", 1), &ada, before, &call)?
+                .contains("changed")
+        );
         weekly.tick_chat(-1, weekly.wall_clock(at("2026-11-16T18:59:59Z")), &call)?;
-        assert!(calls.borrow().is_empty());
+        assert!(calls.lock().unwrap().is_empty());
         weekly.tick_chat(-1, weekly.wall_clock(at("2026-11-16T19:00:00Z")), &call)?;
         let (method, card) = last();
         assert_eq!(method, "editMessageText");
@@ -543,6 +665,22 @@ mod tests {
         assert_eq!(state["-1"]["time"], "13:30");
         assert_eq!(state["-1"]["rsvps"], json!({}));
         assert_eq!(state["-1"]["voterNames"]["3"], "Cora");
+        let lunch_time = at("2026-11-16T19:02:00Z");
+        let guest = json!({"id":2, "first_name":"Ben"});
+        assert_eq!(
+            weekly.mini_select(-1, 5, ("rsvp", 0), &guest, lunch_time, &call)?,
+            "Saved"
+        );
+        let view = weekly.mini_view(-1, &guest, lunch_time).unwrap();
+        assert_eq!(view["lunch"]["selected"], 0);
+        assert_eq!(view["lunch"]["responses"][0]["names"], json!(["Ben"]));
+        assert_eq!(view["lunch"]["times"], json!([]));
+        assert!(
+            last().1["text"]
+                .as_str()
+                .unwrap()
+                .contains("Going (1) · Ben")
+        );
 
         weekly.tick_chat(-1, weekly.wall_clock(at("2026-11-18T13:30:00Z")), &call)?;
         let (method, poll) = last();
