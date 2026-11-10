@@ -101,3 +101,20 @@ control whether anonymous pulls are allowed.
 
 GitHub hosts the code and image. Run the container on an always-on Docker host
 to receive Telegram updates and keep the weekly schedule.
+
+## Releases
+
+For a release, update the package version in `Cargo.toml` and refresh
+`Cargo.lock` with `cargo check`. Commit both files to `main`, then tag that
+commit with the matching version, for example:
+
+```sh
+git tag -a v0.1.0 -m 'Release v0.1.0'
+git push origin v0.1.0
+```
+
+The tag build verifies the version and publishes the tested image under the
+version without the `v` prefix, such as `ghcr.io/eckphi/pizza-lunch-bot:0.1.0`.
+Once that succeeds, the workflow creates a GitHub Release with generated
+notes and the image reference. Use the version tag in deployments and
+create a new version for subsequent changes.
