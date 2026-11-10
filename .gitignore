@@ -2,5 +2,5 @@
 .env.*
 lunch-state.json
 lunch-state.json.tmp
-node_modules/
+/target/
 .DS_Store

@@ -10,19 +10,27 @@ the names behind each vote when group members open the poll results.
 2. Add your bot to the Telegram group as a regular member. Keep BotFather's
    default Group Privacy setting enabled. The bot needs permission to send
    messages and polls in the group.
-3. With Node.js 22 or later installed, open Terminal in this folder. On macOS
+3. With a current stable Rust toolchain installed, open Terminal in this folder. On macOS
    with the default zsh shell, run the following and paste the token at the
    hidden prompt.
 
    ```zsh
    read -rs 'TELEGRAM_BOT_TOKEN?Paste your BotFather token and press Enter: '
    export TELEGRAM_BOT_TOKEN
-   node bot.mjs
+   cargo run --locked --release
    ```
 
    Leave the process running to handle new commands. For use while your
    computer is asleep, run it on an always-on machine with the token set as
    a secret environment variable. Run one copy per token.
+
+### Upgrading from JavaScript
+
+Stop the old bot before starting the Rust version. Keep the same Telegram token,
+working directory, time zone and state file. Rust reads the existing state and
+uses the same buttons and message IDs, so an open poll can continue in place.
+To roll back, stop Rust and start the previous JavaScript version with the same
+settings. Run only one version at a time.
 
 ## Start the weekly cycle
 
@@ -60,3 +68,36 @@ Telegram polls.
 To rename an existing bot in Telegram, send `/setname` to
 [@BotFather](https://t.me/BotFather) and choose a display name such as
 **🍕 Pizza Bot**. Your bot username and commands stay the same.
+
+## Docker
+
+Build for your machine from the repository root.
+
+```sh
+docker build -t pizza-lunch-bot .
+```
+
+With `TELEGRAM_BOT_TOKEN` already exported in your shell, start one container
+and keep its state in a named volume.
+
+```sh
+docker run -d --name pizza-lunch-bot --restart unless-stopped \
+  --env TELEGRAM_BOT_TOKEN --env LUNCH_TIME_ZONE=Europe/Vienna \
+  --volume pizza-lunch-state:/data pizza-lunch-bot
+```
+
+The container runs as UID 10001 and stores the poll in
+`/data/lunch-state.json`. If you migrate an existing file into the volume,
+ensure UID 10001 can read the file and write to the directory. Keep the volume
+when replacing the container.
+
+## GitHub Actions
+
+Pull requests and pushes to `main` run formatting, Clippy, tests, and a
+container smoke test. A successful push to `main` publishes the tested Linux
+amd64 image to GitHub Container Registry as `latest` and with the commit SHA
+as a tag. The package may initially be private. Its GitHub package settings
+control whether anonymous pulls are allowed.
+
+GitHub hosts the code and image. Run the container on an always-on Docker host
+to receive Telegram updates and keep the weekly schedule.

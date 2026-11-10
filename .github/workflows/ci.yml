@@ -1,0 +1,68 @@
+name: CI and container
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: pizza-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          cargo +stable fmt --check
+          cargo +stable clippy --locked --all-targets -- -D warnings
+          cargo +stable test --locked
+      - name: Build and smoke test the image
+        run: |
+          docker build --tag pizza-lunch-bot:ci \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" .
+          code=0
+          output=$(docker run --rm --network none pizza-lunch-bot:ci 2>&1) || code=$?
+          test "$code" -eq 1
+          grep -F 'Set TELEGRAM_BOT_TOKEN' <<< "$output"
+      - name: Export the verified image
+        if: github.event_name == 'push'
+        run: docker save --output "${RUNNER_TEMP}/pizza-image.tar" pizza-lunch-bot:ci
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: pizza-image
+          path: ${{ runner.temp }}/pizza-image.tar
+          retention-days: 1
+
+  publish:
+    if: github.event_name == 'push'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pizza-image
+          path: ${{ runner.temp }}
+      - name: Publish the verified image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          docker load --input "${RUNNER_TEMP}/pizza-image.tar"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker tag pizza-lunch-bot:ci "$image:$GITHUB_SHA"
+          docker tag pizza-lunch-bot:ci "$image:latest"
+          docker push "$image:$GITHUB_SHA"
+          docker push "$image:latest"
