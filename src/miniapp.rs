@@ -1,10 +1,10 @@
 use crate::{
-    Call, Result, pizza_poll,
+    Call, access, pizza_poll,
     weekly::{Destination, Weekly},
 };
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
+    extract::State,
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -16,9 +16,7 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use std::{
     collections::BTreeMap,
-    net::TcpListener,
     sync::{Arc, Mutex},
-    thread,
 };
 use tokio::sync::Semaphore;
 
@@ -85,19 +83,8 @@ impl Launch {
     }
 }
 
-pub fn serve(
-    address: &str,
-    token: String,
-    weekly: Arc<Mutex<Weekly>>,
-    call: Arc<Call<'static>>,
-) -> Result<()> {
-    let listener = TcpListener::bind(address)?;
-    listener.set_nonblocking(true)?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()?;
-    let app = Router::new()
+pub fn router(token: String, weekly: Arc<Mutex<Weekly>>, call: Arc<Call<'static>>) -> Router {
+    Router::new()
         .route("/", get(page))
         .route(
             "/app.css",
@@ -118,23 +105,12 @@ pub fn serve(
             }),
         )
         .route("/api/plan", post(plan))
-        .layer(DefaultBodyLimit::max(16_384))
         .with_state(Arc::new(App {
             token,
             weekly,
             call,
             slots: Arc::new(Semaphore::new(12)),
-        }));
-    thread::spawn(move || {
-        let result = runtime.block_on(async {
-            axum::serve(tokio::net::TcpListener::from_std(listener)?, app).await
-        });
-        if let Err(error) = result {
-            eprintln!("Mini App server stopped: {error}");
-        }
-    });
-    println!("Pizza Mini App listening on {address}");
-    Ok(())
+        }))
 }
 
 async fn page() -> impl IntoResponse {
@@ -201,6 +177,17 @@ async fn authenticated_plan(
         if !is_member {
             return failure(StatusCode::FORBIDDEN, "This pizza plan is only available to group members.");
         }
+        let Ok(mut weekly) = app.weekly.lock() else {
+            return failure(StatusCode::INTERNAL_SERVER_ERROR, "Pizza Lunch is temporarily unavailable.");
+        };
+        match weekly.authorize(Some((key, "")), &user) {
+            Ok(true) => {}
+            Ok(false) => return failure(StatusCode::FORBIDDEN, access::DENIED),
+            Err(error) => {
+                eprintln!("Could not update the access directory: {error}");
+                return failure(StatusCode::INTERNAL_SERVER_ERROR, "Pizza Lunch is temporarily unavailable.");
+            }
+        }
         let selection = match (launch, request) {
             (Launch::Poll { destination, planning }, Some(Request::Poll { details })) => {
                 if member["status"] == "restricted" && member["can_send_messages"] != true {
@@ -221,9 +208,6 @@ async fn authenticated_plan(
             (Launch::Weekly(_), Some(Request::Selection(selection))) => Some(selection),
             (Launch::Weekly(_), None) => None,
             _ => return failure(StatusCode::BAD_REQUEST, "Open the poll form from the command in your group."),
-        };
-        let Ok(mut weekly) = app.weekly.lock() else {
-            return failure(StatusCode::INTERNAL_SERVER_ERROR, "Pizza Lunch is temporarily unavailable.");
         };
         let now = Utc::now();
         let notice = if let Some(selection) = selection {
@@ -288,6 +272,7 @@ fn validate(data: &str, token: &str, now: i64) -> Option<(Launch, Value, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
 
     #[test]
     fn validates_telegram_signature_and_rejects_tampering() {
@@ -312,23 +297,27 @@ mod tests {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&calls);
         let token = "123:fake-token";
+        let path =
+            std::env::temp_dir().join(format!("pizza-form-test-{}.json", std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(path.with_extension("access.json"));
+        let mut weekly = Weekly::load(path, chrono_tz::Europe::Vienna)?;
+        weekly.configure_access(true)?;
+        weekly.enable_mini_app("https://t.me/pizza_bot/pizza".into());
         let app = Arc::new(App {
             token: token.into(),
-            weekly: Arc::new(Mutex::new(Weekly::load(
-                std::env::temp_dir().join(format!("pizza-form-test-{}.json", std::process::id())),
-                chrono_tz::Europe::Vienna,
-            )?)),
+            weekly: Arc::new(Mutex::new(weekly)),
             call: Arc::new(move |method, body| {
                 captured.lock().unwrap().push((method.to_owned(), body));
                 Ok(json!({"status":"member"}))
             }),
             slots: Arc::new(Semaphore::new(1)),
         });
-        app.weekly
-            .lock()
-            .unwrap()
-            .enable_mini_app("https://t.me/pizza_bot/pizza".into());
-
         for (command, details, multiple, first_choice) in [
             (
                 "/plan",
@@ -341,7 +330,7 @@ mod tests {
             crate::handle(
                 &json!({"message": {
                     "text": command, "entities": [{"type":"bot_command", "offset":0}],
-                    "chat":{"id":-123, "type":"supergroup"},
+                    "chat":{"id":-123, "type":"supergroup"}, "from":{"id":42},
                     "is_topic_message":true, "message_thread_id":7
                 }}),
                 "pizza_bot",
@@ -379,21 +368,41 @@ mod tests {
                 .finish();
             let mut headers = HeaderMap::new();
             headers.insert(header::AUTHORIZATION, format!("tma {data}").parse()?);
-            let (status, _) = runtime.block_on(authenticated_plan(
-                Arc::clone(&app),
-                headers,
-                Some(Request::Poll {
-                    details: details.into(),
-                }),
-            ));
+            let submit = |headers| {
+                runtime.block_on(authenticated_plan(
+                    Arc::clone(&app),
+                    headers,
+                    Some(Request::Poll {
+                        details: details.into(),
+                    }),
+                ))
+            };
+            let (status, _) = submit(headers.clone());
             assert_eq!(status, StatusCode::OK);
-            let calls = calls.lock().unwrap();
-            let (method, poll) = calls.last().unwrap();
+            let recorded = calls.lock().unwrap();
+            let (method, poll) = recorded.last().unwrap();
             assert_eq!(method, "sendPoll");
             assert_eq!(poll["chat_id"], -123);
             assert_eq!(poll["message_thread_id"], 7);
             assert_eq!(poll["allows_multiple_answers"], multiple);
             assert_eq!(poll["options"][0]["text"], first_choice);
+            drop(recorded);
+
+            let set_rule =
+                |rule| {
+                    app.weekly.lock().unwrap().access.as_mut().unwrap().apply(
+                        access::Change::SetRule {
+                            kind: access::Kind::User,
+                            id: "42".into(),
+                            rule,
+                        },
+                    )
+                };
+            assert!(set_rule(access::Rule::Block)?);
+            let (status, _) = submit(headers);
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(calls.lock().unwrap().last().unwrap().0, "getChatMember");
+            assert!(set_rule(access::Rule::Default)?);
         }
         Ok(())
     }

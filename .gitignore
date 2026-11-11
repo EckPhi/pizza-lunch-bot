@@ -2,5 +2,7 @@
 .env.*
 lunch-state.json
 lunch-state.json.tmp
+lunch-state.access.json
+lunch-state.access.json.tmp
 /target/
 .DS_Store

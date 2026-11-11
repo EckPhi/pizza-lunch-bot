@@ -1,11 +1,16 @@
+mod access;
+mod admin;
+#[cfg(test)]
+mod flow_docs;
 mod miniapp;
 mod weekly;
 
+use axum::{Router, extract::DefaultBodyLimit};
 use chrono::Utc;
 use reqwest::blocking::Client;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
-use std::{env, error::Error, fmt, path::PathBuf, thread, time::Duration};
+use std::{env, error::Error, fmt, net::TcpListener, path::PathBuf, thread, time::Duration};
 use weekly::{Destination, Weekly};
 
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -29,8 +34,32 @@ impl Error for ApiError {}
 type Call<'a> = dyn Fn(&str, Value) -> Result<Value> + Send + Sync + 'a;
 
 fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> Result<()> {
-    let now = Utc::now();
+    handle_at(update, username, weekly, call, Utc::now())
+}
+
+fn handle_at(
+    update: &Value,
+    username: &str,
+    weekly: &mut Weekly,
+    call: &Call,
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
     if let Some(query) = update.get("callback_query") {
+        if !query["data"]
+            .as_str()
+            .is_some_and(|data| data.starts_with("weekly:"))
+        {
+            return Ok(());
+        }
+        if !weekly.authorize(access::group(&query["message"]["chat"]), &query["from"])? {
+            return call(
+                "answerCallbackQuery",
+                json!({
+                    "callback_query_id": query["id"], "text": access::DENIED
+                }),
+            )
+            .map(|_| ());
+        }
         return weekly.tap(query, now, call);
     }
 
@@ -64,6 +93,14 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
     };
     let reply =
         |text: &str| call("sendMessage", destination.body(json!({ "text": text }))).map(|_| ());
+    let user = if message["sender_chat"].is_null() {
+        &message["from"]
+    } else {
+        &Value::Null
+    };
+    if !weekly.authorize(access::group(&message["chat"]), user)? {
+        return reply(access::DENIED);
+    }
     if matches!(command.as_str(), "/help" | "/start") {
         return reply(&format!(
             "🍕 Pizza Bot\n\n/weekly@{username} starts a recurring pizza poll.\n/status@{username} shows the leading day or scheduled lunch.\n\n/plan@{username} Tuesday 12:00 | Wednesday 12:30 | Friday 12:00\nVote for every time you can make.\n\n/lunch@{username} Wednesday 12:30 at your favorite pizzeria\nConfirm the time and place and see who's coming."
@@ -137,6 +174,27 @@ fn pizza_poll(planning: bool, details: &str) -> std::result::Result<Value, &'sta
     }))
 }
 
+fn serve_http(name: &'static str, address: &str, router: Router) -> Result<()> {
+    let listener = TcpListener::bind(address)
+        .map_err(|error| format!("Could not bind {name} to {address}: {error}"))?;
+    listener.set_nonblocking(true)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let router = router.layer(DefaultBodyLimit::max(16_384));
+    thread::spawn(move || {
+        let result = runtime.block_on(async {
+            axum::serve(tokio::net::TcpListener::from_std(listener)?, router).await
+        });
+        if let Err(error) = result {
+            eprintln!("{name} server stopped: {error}");
+        }
+    });
+    println!("{name} listening on {address}");
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let token = env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default();
     let token = token.trim().to_owned();
@@ -157,7 +215,9 @@ fn run() -> Result<()> {
         .map_err(|_| "LUNCH_TIME_ZONE must be an IANA time zone")?;
     let path = env::var_os("LUNCH_STATE_FILE")
         .map_or_else(|| PathBuf::from("lunch-state.json"), PathBuf::from);
+    let admin = admin::Key::from_env()?;
     let mut weekly = Weekly::load(path, zone)?;
+    weekly.configure_access(admin.is_some())?;
 
     let client = Client::builder().timeout(Duration::from_secs(45)).build()?;
     let api_token = token.clone();
@@ -206,7 +266,19 @@ fn run() -> Result<()> {
     let weekly = Arc::new(Mutex::new(weekly));
     if !app.is_empty() {
         let address = env::var("PIZZA_MINI_APP_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".into());
-        miniapp::serve(&address, token, Arc::clone(&weekly), Arc::clone(&call))?;
+        serve_http(
+            "Mini App",
+            &address,
+            miniapp::router(token, Arc::clone(&weekly), Arc::clone(&call)),
+        )?;
+    }
+    if let Some(admin) = admin {
+        let address = env::var("PIZZA_ADMIN_LISTEN").unwrap_or_else(|_| "127.0.0.1:8081".into());
+        serve_http(
+            "Admin website",
+            &address,
+            admin::router(admin, Arc::clone(&weekly)),
+        )?;
     }
     println!("Listening as @{username}. Press Ctrl-C to stop.");
     let mut offset = 0;

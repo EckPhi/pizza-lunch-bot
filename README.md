@@ -117,6 +117,15 @@ control whether anonymous pulls are allowed.
 GitHub hosts the code and image. Run the container on an always-on Docker host
 to receive Telegram updates and keep the weekly schedule.
 
+Each CI run generates a Markdown guide by running the bot with sample users,
+a fixed clock, and a mock Telegram API. Download **pizza-message-flows** from
+the workflow run summary or its Artifacts section. To generate the same guide
+locally, run the following command.
+
+```sh
+PIZZA_FLOW_DOCS_FILE=target/message-flows.md cargo test --locked generate_message_flow_guide
+```
+
 ## Releases
 
 For a release, update the package version in `Cargo.toml` and refresh
@@ -155,5 +164,41 @@ The Mini App and the Telegram poll use the same saved state.
 
 For Runtipi, an HTTPS route to container port 8080 and the Mini App short
 name environment variable must be configured. The original headless store
-entry uses Telegram buttons only. If the short name is unset, the bot runs
-without the HTTP server.
+entry uses Telegram buttons only. The Mini App listener runs when the short
+name is configured.
+
+## Admin website
+
+Set `PIZZA_ADMIN_TOKEN` to a separate random secret of at least 32 visible
+ASCII characters, for example one generated with `openssl rand -hex 32`.
+Restart the bot and open `http://127.0.0.1:8081/` on the host. Sign in
+with the token. Set `PIZZA_ADMIN_LISTEN` to override the admin bind address.
+For remote access, route an HTTPS reverse proxy to the admin listener on
+port 8081 and open the root of that HTTPS domain. The admin website can run
+on its own without a BotFather Mini App.
+
+For Docker with a reverse proxy on the host, add
+`--env PIZZA_ADMIN_TOKEN --env PIZZA_ADMIN_LISTEN=0.0.0.0:8081`
+and `--publish 127.0.0.1:8081:8081` to the run command. Set
+`PIZZA_ADMIN_TOKEN` in the host environment before running it.
+
+The directory lists Telegram group and user IDs, names observed by the bot,
+and which groups each user interacted in. An existing weekly state file
+supplies historical IDs. New entries appear when someone uses a bot command,
+weekly button, or the Mini App, including attempts denied by an allowlist.
+
+- **Allow** and **Block** override the default for that ID. **Default** follows
+  the corresponding group or user setting.
+- **Only allow entries marked Allow** enables an allowlist for groups or
+  users. Both rules must permit a group interaction. Mark your own test group
+  and user as **Allow** before enabling both modes.
+- Blocking a group pauses scheduled weekly messages. Blocking a user prevents
+  new bot interactions by that account. Telegram handles votes on native
+  one-off polls, so those polls follow Telegram's group permissions.
+- When access management is active, use commands from your Telegram account.
+  Telegram hides the account behind messages sent as an anonymous admin or channel.
+
+The directory and its rules are saved alongside the weekly state in
+`lunch-state.access.json` by default. Keep both files on the persistent
+volume. Removing the admin token disables the website while preserving the
+saved access rules.

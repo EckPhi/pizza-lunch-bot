@@ -21,11 +21,24 @@ jobs:
         with:
           persist-credentials: false
       - name: Check Rust
+        env:
+          PIZZA_FLOW_DOCS_FILE: ${{ runner.temp }}/message-flows.md
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           cargo +stable fmt --check
           cargo +stable clippy --locked --all-targets -- -D warnings
           cargo +stable test --locked
+      - name: Upload generated message-flow guide
+        uses: actions/upload-artifact@v4
+        id: flow-guide
+        with:
+          name: pizza-message-flows
+          path: ${{ runner.temp }}/message-flows.md
+          if-no-files-found: error
+      - name: Link the guide from the run summary
+        env:
+          FLOW_GUIDE_URL: ${{ steps.flow-guide.outputs.artifact-url }}
+        run: printf '[Download the generated message-flow guide](%s)\n' "$FLOW_GUIDE_URL" >> "$GITHUB_STEP_SUMMARY"
       - name: Check release tag
         if: github.ref_type == 'tag'
         run: |

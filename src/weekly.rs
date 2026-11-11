@@ -1,4 +1,7 @@
-use crate::{ApiError, Call, Result};
+use crate::{
+    ApiError, Call, Result,
+    access::{self, Access},
+};
 use chrono::{DateTime, Datelike, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -321,6 +324,7 @@ pub struct Weekly {
     zone: Tz,
     cycles: BTreeMap<i64, Cycle>,
     mini_app: Option<String>,
+    pub access: Option<Access>,
 }
 
 impl Weekly {
@@ -346,7 +350,41 @@ impl Weekly {
             zone,
             cycles,
             mini_app: None,
+            access: None,
         })
+    }
+
+    pub fn configure_access(&mut self, enabled: bool) -> Result<()> {
+        let path = self.path.with_extension("access.json");
+        if !enabled && !path.try_exists()? {
+            return Ok(());
+        }
+        let mut access = Access::load(path)?;
+        for (id, cycle) in &self.cycles {
+            let group = Some((*id, ""));
+            access.observe(group, None)?;
+            for person in std::iter::once(&cycle.owner)
+                .chain(cycle.votes.keys())
+                .chain(cycle.rsvps.keys())
+            {
+                if let Ok(user_id) = person.parse::<i64>()
+                    && user_id > 0
+                {
+                    access.observe(group, Some((user_id, "")))?;
+                }
+            }
+        }
+        self.access = Some(access);
+        Ok(())
+    }
+
+    pub fn authorize(&mut self, group: Option<(i64, &str)>, user: &Value) -> Result<bool> {
+        let Some(access) = &mut self.access else {
+            return Ok(true);
+        };
+        let user = access::user_id(user).map(|id| (id, display_name(user)));
+        access.observe(group, user.as_ref().map(|(id, name)| (*id, name.as_str())))?;
+        Ok(access.allows(group.map(|(id, _)| id), user.map(|(id, _)| id)))
     }
 
     pub fn enable_mini_app(&mut self, link: String) {
@@ -584,6 +622,13 @@ impl Weekly {
         let now = self.wall_clock(now);
         let keys: Vec<_> = self.cycles.keys().copied().collect();
         for key in keys {
+            if self
+                .access
+                .as_ref()
+                .is_some_and(|access| !access.allows_group(key))
+            {
+                continue;
+            }
             if let Err(error) = self.tick_chat(key, now, call) {
                 eprintln!("Weekly update failed for chat {key}: {error}");
             }
