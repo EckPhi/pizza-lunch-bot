@@ -118,9 +118,11 @@ GitHub hosts the code and image. Run the container on an always-on Docker host
 to receive Telegram updates and keep the weekly schedule.
 
 Each CI run generates a Markdown guide by running the bot with sample users,
-a fixed clock, and a mock Telegram API. Download **pizza-message-flows** from
-the workflow run summary or its Artifacts section. To generate the same guide
-locally, run the following command.
+a fixed clock, and a mock Telegram API. Successful builds on `main` publish
+the [message-flow guide](https://eckphi.github.io/pizza-lunch-bot/) to GitHub
+Pages. Download the Markdown as **pizza-message-flows** from the workflow run
+summary or its Artifacts section. To generate it locally, run the following
+command.
 
 ```sh
 PIZZA_FLOW_DOCS_FILE=target/message-flows.md cargo test --locked generate_message_flow_guide
