@@ -1,4 +1,7 @@
-use crate::{Call, Result, weekly::Weekly};
+use crate::{
+    Call, Result, pizza_poll,
+    weekly::{Destination, Weekly},
+};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
@@ -34,6 +37,52 @@ struct Selection {
     message: i64,
     action: String,
     index: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Request {
+    Selection(Selection),
+    Poll { details: String },
+}
+
+#[derive(Clone, Copy)]
+enum Launch {
+    Weekly(i64),
+    Poll {
+        destination: Destination,
+        planning: bool,
+    },
+}
+
+impl Launch {
+    fn parse(param: &str) -> Option<Self> {
+        if let Some((mode, target)) = param.split_once('_') {
+            let planning = match mode {
+                "plan" => true,
+                "lunch" => false,
+                _ => return None,
+            };
+            let (chat, topic) = match target.split_once('_') {
+                Some((chat, topic)) => (chat, Some(topic.parse::<i64>().ok()?)),
+                None => (target, None),
+            };
+            let chat_id = chat.parse().ok()?;
+            if chat_id >= 0 || topic.is_some_and(|id| id <= 0) {
+                return None;
+            }
+            Some(Self::Poll {
+                destination: Destination {
+                    chat_id,
+                    message_thread_id: topic,
+                },
+                planning,
+            })
+        } else {
+            let chat = param.parse().ok()?;
+            (chat < 0).then_some(Self::Weekly(chat))
+        }
+    }
 }
 
 pub fn serve(
@@ -105,22 +154,22 @@ fn failure(status: StatusCode, message: &str) -> ApiReply {
 async fn plan(
     State(app): State<Arc<App>>,
     headers: HeaderMap,
-    Json(selection): Json<Option<Selection>>,
+    Json(request): Json<Option<Request>>,
 ) -> impl IntoResponse {
-    let reply = authenticated_plan(app, headers, selection).await;
+    let reply = authenticated_plan(app, headers, request).await;
     ([(header::CACHE_CONTROL, "no-store")], reply)
 }
 
 async fn authenticated_plan(
     app: Arc<App>,
     headers: HeaderMap,
-    selection: Option<Selection>,
+    request: Option<Request>,
 ) -> ApiReply {
     let init_data = headers
         .get(header::AUTHORIZATION)
         .and_then(|header| header.to_str().ok())
         .and_then(|header| header.strip_prefix("tma "));
-    let Some((key, user, user_id)) =
+    let Some((launch, user, user_id)) =
         init_data.and_then(|data| validate(data, &app.token, Utc::now().timestamp()))
     else {
         return failure(
@@ -138,6 +187,10 @@ async fn authenticated_plan(
 
     let response = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let key = match launch {
+            Launch::Weekly(chat) => chat,
+            Launch::Poll { destination, .. } => destination.chat_id,
+        };
         let member = (app.call)("getChatMember", json!({"chat_id":key, "user_id":user_id}));
         let member = match member {
             Ok(member) => member,
@@ -148,6 +201,27 @@ async fn authenticated_plan(
         if !is_member {
             return failure(StatusCode::FORBIDDEN, "This pizza plan is only available to group members.");
         }
+        let selection = match (launch, request) {
+            (Launch::Poll { destination, planning }, Some(Request::Poll { details })) => {
+                if member["status"] == "restricted" && member["can_send_messages"] != true {
+                    return failure(StatusCode::FORBIDDEN, "You need permission to send messages in this group.");
+                }
+                let body = match pizza_poll(planning, details.trim()) {
+                    Ok(body) => body,
+                    Err(message) => return failure(StatusCode::BAD_REQUEST, message),
+                };
+                return match (app.call)("sendPoll", destination.body(body)) {
+                    Ok(_) => (StatusCode::OK, Json(json!({"posted": true}))),
+                    Err(error) => {
+                        eprintln!("Mini App poll submission failed: {error}");
+                        failure(StatusCode::BAD_GATEWAY, "Could not confirm the poll was posted. Check the group before trying again.")
+                    }
+                };
+            }
+            (Launch::Weekly(_), Some(Request::Selection(selection))) => Some(selection),
+            (Launch::Weekly(_), None) => None,
+            _ => return failure(StatusCode::BAD_REQUEST, "Open the poll form from the command in your group."),
+        };
         let Ok(mut weekly) = app.weekly.lock() else {
             return failure(StatusCode::INTERNAL_SERVER_ERROR, "Pizza Lunch is temporarily unavailable.");
         };
@@ -180,7 +254,7 @@ async fn authenticated_plan(
     })
 }
 
-fn validate(data: &str, token: &str, now: i64) -> Option<(i64, Value, i64)> {
+fn validate(data: &str, token: &str, now: i64) -> Option<(Launch, Value, i64)> {
     let mut fields = BTreeMap::new();
     for (key, value) in url::form_urlencoded::parse(data.as_bytes()) {
         if fields.insert(key, value).is_some() {
@@ -205,10 +279,10 @@ fn validate(data: &str, token: &str, now: i64) -> Option<(i64, Value, i64)> {
     {
         return None;
     }
-    let chat = fields.get("start_param")?.parse::<i64>().ok()?;
+    let launch = Launch::parse(fields.get("start_param")?)?;
     let user: Value = serde_json::from_str(fields.get("user")?).ok()?;
     let user_id = user["id"].as_i64()?;
-    (chat < 0 && user_id > 0).then_some((chat, user, user_id))
+    (user_id > 0).then_some((launch, user, user_id))
 }
 
 #[cfg(test)]
@@ -220,12 +294,107 @@ mod tests {
         // Independently generated using Python's hmac and urllib.
         let data = "auth_date=1800000000&chat_type=supergroup&start_param=-123&user=%7B%22id%22%3A42%2C%22first_name%22%3A%22Ada%22%7D&signature=example&hash=bc4d618c5443c8886d37cd145f63dbe655c2116dbbfbbc63e32493728c0da872";
         let token = "123:fake-token";
-        let (chat, user, id) = validate(data, token, 1_800_000_001).unwrap();
-        assert_eq!((chat, id), (-123, 42));
+        let (launch, user, id) = validate(data, token, 1_800_000_001).unwrap();
+        assert!(matches!(launch, Launch::Weekly(-123)));
+        assert_eq!(id, 42);
         assert_eq!(user["first_name"], "Ada");
         assert!(validate(data, token, 1_800_003_601).is_none());
         assert!(validate(data, "123:other-token", 1_800_000_001).is_none());
         assert!(validate(&data.replace("-123", "-456"), token, 1_800_000_001).is_none());
         assert!(validate(&format!("{data}&start_param=-123"), token, 1_800_000_001).is_none());
+    }
+
+    #[test]
+    fn poll_forms_post_the_expected_poll_to_the_original_topic() -> Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&calls);
+        let token = "123:fake-token";
+        let app = Arc::new(App {
+            token: token.into(),
+            weekly: Arc::new(Mutex::new(Weekly::load(
+                std::env::temp_dir().join(format!("pizza-form-test-{}.json", std::process::id())),
+                chrono_tz::Europe::Vienna,
+            )?)),
+            call: Arc::new(move |method, body| {
+                captured.lock().unwrap().push((method.to_owned(), body));
+                Ok(json!({"status":"member"}))
+            }),
+            slots: Arc::new(Semaphore::new(1)),
+        });
+        app.weekly
+            .lock()
+            .unwrap()
+            .enable_mini_app("https://t.me/pizza_bot/pizza".into());
+
+        for (command, details, multiple, first_choice) in [
+            (
+                "/plan",
+                "Tuesday 12:00 | Wednesday 12:30",
+                true,
+                "Tuesday 12:00",
+            ),
+            ("/lunch", "Wednesday 12:30 at Pizzeria Roma", false, "Going"),
+        ] {
+            crate::handle(
+                &json!({"message": {
+                    "text": command, "entities": [{"type":"bot_command", "offset":0}],
+                    "chat":{"id":-123, "type":"supergroup"},
+                    "is_topic_message":true, "message_thread_id":7
+                }}),
+                "pizza_bot",
+                &mut app.weekly.lock().unwrap(),
+                &*app.call,
+            )?;
+            let link = {
+                let calls = calls.lock().unwrap();
+                assert_eq!(calls.last().unwrap().0, "sendMessage");
+                calls.last().unwrap().1["reply_markup"]["inline_keyboard"][0][0]["url"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            };
+            let (_, launch) = link.split_once("?startapp=").unwrap();
+            let auth_date = Utc::now().timestamp().to_string();
+            let fields = [
+                ("auth_date", auth_date.as_str()),
+                ("chat_type", "supergroup"),
+                ("start_param", launch),
+                ("user", r#"{"id":42}"#),
+            ];
+            let mut key = Signature::new_from_slice(b"WebAppData")?;
+            key.update(token.as_bytes());
+            let mut mac = Signature::new_from_slice(&key.finalize().into_bytes())?;
+            mac.update(
+                fields
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .join("\n")
+                    .as_bytes(),
+            );
+            let data = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(fields)
+                .append_pair("hash", &hex::encode(mac.finalize().into_bytes()))
+                .finish();
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, format!("tma {data}").parse()?);
+            let (status, _) = runtime.block_on(authenticated_plan(
+                Arc::clone(&app),
+                headers,
+                Some(Request::Poll {
+                    details: details.into(),
+                }),
+            ));
+            assert_eq!(status, StatusCode::OK);
+            let calls = calls.lock().unwrap();
+            let (method, poll) = calls.last().unwrap();
+            assert_eq!(method, "sendPoll");
+            assert_eq!(poll["chat_id"], -123);
+            assert_eq!(poll["message_thread_id"], 7);
+            assert_eq!(poll["allows_multiple_answers"], multiple);
+            assert_eq!(poll["options"][0]["text"], first_choice);
+        }
+        Ok(())
     }
 }

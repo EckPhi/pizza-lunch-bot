@@ -93,6 +93,16 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
 
     let details = text[address.len()..].trim();
     let planning = command == "/plan";
+    if details.is_empty() && weekly.send_poll_form(destination, planning, call)? {
+        return Ok(());
+    }
+    match pizza_poll(planning, details) {
+        Ok(body) => call("sendPoll", destination.body(body)).map(|_| ()),
+        Err(message) => reply(message),
+    }
+}
+
+fn pizza_poll(planning: bool, details: &str) -> std::result::Result<Value, &'static str> {
     let (question, choices) = if planning {
         let choices: Vec<_> = details.split('|').map(str::trim).collect();
         if !(2..=12).contains(&choices.len())
@@ -102,9 +112,7 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
                     || choices[..i].contains(choice)
             })
         {
-            return reply(
-                "Give me 2–12 different times separated by |, up to 100 characters each.",
-            );
+            return Err("Give me 2–12 different times separated by |, up to 100 characters each.");
         }
         (
             "🍕 When can you join for pizza? Select every time that works.".to_owned(),
@@ -113,7 +121,7 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
     } else {
         let question = format!("🍕 Pizza · {details}");
         if details.is_empty() || question.encode_utf16().count() > 300 {
-            return reply(
+            return Err(
                 "Add a short date, time and place. Example: /lunch Wednesday 12:30 at your favorite pizzeria",
             );
         }
@@ -123,14 +131,10 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
         .into_iter()
         .map(|text| json!({ "text": text }))
         .collect();
-    call(
-        "sendPoll",
-        destination.body(json!({
-            "question": question, "options": options, "is_anonymous": false,
-            "allows_multiple_answers": planning
-        })),
-    )?;
-    Ok(())
+    Ok(json!({
+        "question": question, "options": options, "is_anonymous": false,
+        "allows_multiple_answers": planning
+    }))
 }
 
 fn run() -> Result<()> {
@@ -181,8 +185,8 @@ fn run() -> Result<()> {
     let mut commands = vec![
         json!({"command":"weekly","description":"Start the weekly pizza poll"}),
         json!({"command":"status","description":"Show the leading day or scheduled pizza lunch"}),
-        json!({"command":"plan","description":"Poll the group for available pizza times"}),
-        json!({"command":"lunch","description":"Post pizza meetup details and collect RSVPs"}),
+        json!({"command":"plan","description":"Create an availability poll"}),
+        json!({"command":"lunch","description":"Create a pizza RSVP poll"}),
         json!({"command":"help","description":"Show pizza bot examples"}),
     ];
     let app = env::var("PIZZA_MINI_APP_SHORT_NAME").unwrap_or_default();

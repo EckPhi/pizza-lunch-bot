@@ -50,3 +50,20 @@ button:disabled { cursor: default; }
 .choices button { flex: 1 0 auto; text-align: center; }
 .tag { margin: 0; color: var(--accent); font-size: .8rem; font-weight: 700; }
 #status { min-height: 1.5rem; }
+#panel[hidden], .poll-form[hidden] { display: none; }
+.poll-form { display: grid; gap: .8rem; margin-top: 1.35rem; }
+.poll-form label { display: grid; gap: .35rem; font-weight: 700; }
+.poll-form input, .poll-form textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: .65rem;
+  border: 1px solid var(--line);
+  border-radius: .65rem;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.poll-form textarea { resize: vertical; }
+.poll-form button { background: #8b291f; color: #fff7e7; text-align: center; font-weight: 700; }
+.poll-form button:disabled { opacity: .65; }

@@ -391,6 +391,36 @@ impl Weekly {
         Ok(())
     }
 
+    pub fn send_poll_form(
+        &self,
+        destination: Destination,
+        planning: bool,
+        call: &Call,
+    ) -> Result<bool> {
+        let Some(link) = &self.mini_app else {
+            return Ok(false);
+        };
+        let (mode, label) = if planning {
+            ("plan", "Create availability poll")
+        } else {
+            ("lunch", "Create RSVP poll")
+        };
+        let mut launch = format!("{mode}_{}", destination.chat_id);
+        if let Some(topic) = destination.message_thread_id {
+            launch.push_str(&format!("_{topic}"));
+        }
+        call(
+            "sendMessage",
+            destination.body(json!({
+                "text": "🍕 Open the form to post a poll in this chat.",
+                "reply_markup": {"inline_keyboard": [[{
+                    "text": label, "url": format!("{link}?startapp={launch}")
+                }]]}
+            })),
+        )?;
+        Ok(true)
+    }
+
     pub fn mini_view(&self, key: i64, user: &Value, now: DateTime<Utc>) -> Option<Value> {
         let cycle = self.cycles.get(&key)?;
         let person = user["id"].as_i64()?.to_string();

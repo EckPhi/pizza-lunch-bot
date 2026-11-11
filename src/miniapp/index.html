@@ -16,6 +16,19 @@
       <p id="subtitle">Make a plan with the group.</p>
     </header>
     <section id="panel" aria-label="Pizza plan" aria-busy="true"></section>
+    <form id="plan-form" class="box poll-form" hidden>
+      <label>Available times
+        <textarea name="times" rows="4" required aria-describedby="times-hint" placeholder="Tuesday 12:00&#10;Wednesday 12:30"></textarea>
+      </label>
+      <p id="times-hint" class="meta">Enter 2–12 different times, one per line.</p>
+      <button type="submit">Post availability poll</button>
+    </form>
+    <form id="lunch-form" class="box poll-form" hidden>
+      <label>Date <input type="date" name="date" required></label>
+      <label>Time <input type="time" name="time" required></label>
+      <label>Place <input name="place" required maxlength="250" placeholder="Pizzeria Roma"></label>
+      <button type="submit">Post RSVP poll</button>
+    </form>
     <p id="status" role="status">Loading your plan…</p>
   </main>
 </body>

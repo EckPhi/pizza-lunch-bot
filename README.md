@@ -41,6 +41,9 @@ Telegram's command suggestions. Select the entry for your Pizza Lunch Bot.
 - `/status` shows the leading day and its vote count, or the scheduled weekly lunch.
 - `/plan` creates a one-off availability poll. Add times separated by `|`.
 - `/lunch` creates a one-off RSVP poll. Add the date, time, and place.
+- With the Mini App configured, send `/plan` or `/lunch` on its own to
+  get a form. Submitting posts the poll in the group or topic where
+  the bot sent the form link. You can use the forms without starting `/weekly`.
 - `/help` shows examples. In a group you can also send `/help@your_bot`
   using the bot's actual username.
 
