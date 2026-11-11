@@ -128,17 +128,18 @@ PIZZA_FLOW_DOCS_FILE=target/message-flows.md cargo test --locked generate_messag
 
 ## Releases
 
-For a release, update the package version in `Cargo.toml` and refresh
-`Cargo.lock` with `cargo check`. Commit both files to `main`, then tag that
-commit with the matching version, for example:
+To release, push or merge your changes to `main`, then tag the commit with
+the version you want to publish.
 
 ```sh
-git tag -a v0.1.0 -m 'Release v0.1.0'
-git push origin v0.1.0
+git fetch origin main
+git tag -a v0.2.0 origin/main -m 'Release v0.2.0'
+git push origin v0.2.0
 ```
 
-The tag build verifies the version and publishes the tested image under the
-version without the `v` prefix, such as `ghcr.io/eckphi/pizza-lunch-bot:0.1.0`.
+CI checks that the commit is on `main`, then sets the Cargo package version
+in its build checkout from the tag. It publishes the tested image under the
+same version, such as `ghcr.io/eckphi/pizza-lunch-bot:0.2.0`.
 Once that succeeds, the workflow creates a GitHub Release with generated
 notes and the image reference. Use the version tag in deployments and
 create a new version for subsequent changes.
