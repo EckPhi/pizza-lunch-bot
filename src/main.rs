@@ -49,7 +49,7 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
     let command = command.to_ascii_lowercase();
     if !matches!(
         command.as_str(),
-        "/help" | "/start" | "/weekly" | "/plan" | "/lunch" | "/pizza"
+        "/help" | "/start" | "/weekly" | "/status" | "/plan" | "/lunch" | "/pizza"
     ) {
         return Ok(());
     }
@@ -66,7 +66,7 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
         |text: &str| call("sendMessage", destination.body(json!({ "text": text }))).map(|_| ());
     if matches!(command.as_str(), "/help" | "/start") {
         return reply(&format!(
-            "🍕 Pizza Bot\n\n/weekly@{username} starts a recurring pizza poll.\n\n/plan@{username} Tuesday 12:00 | Wednesday 12:30 | Friday 12:00\nVote for every time you can make.\n\n/lunch@{username} Wednesday 12:30 at your favorite pizzeria\nConfirm the time and place and see who's coming."
+            "🍕 Pizza Bot\n\n/weekly@{username} starts a recurring pizza poll.\n/status@{username} shows the leading day or scheduled lunch.\n\n/plan@{username} Tuesday 12:00 | Wednesday 12:30 | Friday 12:00\nVote for every time you can make.\n\n/lunch@{username} Wednesday 12:30 at your favorite pizzeria\nConfirm the time and place and see who's coming."
         ));
     }
     if !matches!(
@@ -77,6 +77,9 @@ fn handle(update: &Value, username: &str, weekly: &mut Weekly, call: &Call) -> R
     }
     if command == "/pizza" {
         return weekly.send_mini_app(destination, call);
+    }
+    if command == "/status" {
+        return reply(&weekly.status(destination.chat_id));
     }
     if command == "/weekly" {
         if let Some(owner) = message["from"]["id"]
@@ -177,6 +180,7 @@ fn run() -> Result<()> {
         .ok_or("Telegram returned no bot username")?;
     let mut commands = vec![
         json!({"command":"weekly","description":"Start the weekly pizza poll"}),
+        json!({"command":"status","description":"Show the leading day or scheduled pizza lunch"}),
         json!({"command":"plan","description":"Poll the group for available pizza times"}),
         json!({"command":"lunch","description":"Post pizza meetup details and collect RSVPs"}),
         json!({"command":"help","description":"Show pizza bot examples"}),

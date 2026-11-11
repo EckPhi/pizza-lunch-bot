@@ -96,6 +96,18 @@ impl Cycle {
         })
     }
 
+    fn candidate(&self) -> Option<(usize, usize)> {
+        let totals = self.totals();
+        let high = totals.iter().copied().max()?;
+        if high == 0 {
+            return None;
+        }
+        totals
+            .iter()
+            .position(|total| *total == high)
+            .map(|day| (day, high))
+    }
+
     fn day(&self) -> usize {
         self.day.expect("validated scheduled day")
     }
@@ -111,6 +123,18 @@ impl Cycle {
             .expect("validated calendar date")
             .format("%-d %b")
             .to_string()
+    }
+
+    fn lunch_heading(&self) -> String {
+        let index = self.day();
+        let day = DAYS[index];
+        let date = self.date(index as i64 + 1);
+        let finished = if self.phase == Phase::Done {
+            " (finished)"
+        } else {
+            ""
+        };
+        format!("🍕 Pizza · {day} {date} at {}{finished}", self.time)
     }
 
     fn card(&self, zone: Tz) -> Value {
@@ -134,14 +158,7 @@ impl Cycle {
             Phase::Lunch | Phase::Done => {
                 let index = self.day();
                 let day = DAYS[index];
-                let mut text = format!(
-                    "🍕 Pizza · {day} {} at {}",
-                    self.date(index as i64 + 1),
-                    self.time
-                );
-                if self.phase == Phase::Done {
-                    text.push_str(" (finished)");
-                }
+                let mut text = self.lunch_heading();
                 let unavailable: Vec<_> = self
                     .votes
                     .iter()
@@ -192,10 +209,12 @@ impl Cycle {
 
     fn advance(&mut self, now: i64) {
         if self.phase == Phase::Vote && now >= self.cutoff {
-            let totals = self.totals();
-            let high = totals.iter().copied().max().unwrap_or(0);
-            self.day = totals.iter().position(|total| *total == high);
-            self.phase = if high == 0 { Phase::Skip } else { Phase::Lunch };
+            self.day = self.candidate().map(|(day, _)| day);
+            self.phase = if self.day.is_some() {
+                Phase::Lunch
+            } else {
+                Phase::Skip
+            };
             self.dirty = true;
         }
         if self.phase == Phase::Lunch && now >= self.start_at(&self.time) + HOUR {
@@ -334,6 +353,25 @@ impl Weekly {
         self.mini_app = Some(link);
         for cycle in self.cycles.values_mut() {
             cycle.dirty = true;
+        }
+    }
+
+    pub fn status(&self, chat_id: i64) -> String {
+        let Some(cycle) = self.cycles.get(&chat_id) else {
+            return "🍕 Start the weekly poll first with /weekly.".into();
+        };
+        match cycle.phase {
+            Phase::Vote => {
+                let Some((index, votes)) = cycle.candidate() else {
+                    return "🍕 No votes yet in the weekly poll.".into();
+                };
+                let day = DAYS[index];
+                let date = cycle.date(index as i64 + 1);
+                let unit = if votes == 1 { "vote" } else { "votes" };
+                format!("🍕 Currently leading: {day} {date} · {votes} {unit}")
+            }
+            Phase::Lunch | Phase::Done => cycle.lunch_heading(),
+            Phase::Skip => "🍕 No pizza meetup this week.".into(),
         }
     }
 
@@ -621,6 +659,25 @@ mod tests {
             Ok(json!({"message_id": 6}))
         };
         let last = || calls.lock().unwrap().last().unwrap().clone();
+        assert!(weekly.status(-2).contains("/weekly"));
+        crate::handle(
+            &json!({"message": {
+                "text": "/status@pizza_bot", "entities": [{"type": "bot_command", "offset": 0}],
+                "chat": {"id": -1, "type": "supergroup"},
+                "is_topic_message": true, "message_thread_id": 7
+            }}),
+            "pizza_bot",
+            &mut weekly,
+            &call,
+        )?;
+        let (method, status) = last();
+        assert_eq!(method, "sendMessage");
+        assert_eq!(status["message_thread_id"], 7);
+        assert_eq!(
+            status["text"],
+            "🍕 Currently leading: Wednesday 18 Nov · 2 votes"
+        );
+        calls.lock().unwrap().clear();
         let ada = json!({"id":1, "first_name":"Ada"});
         let before = at("2026-11-16T18:59:59Z");
         let view = weekly.mini_view(-1, &ada, before).unwrap();
@@ -663,6 +720,7 @@ mod tests {
         tap(&mut weekly, "weekly:time:3", 1)?;
         let state: Value = serde_json::from_slice(&fs::read(&path)?)?;
         assert_eq!(state["-1"]["time"], "13:30");
+        assert_eq!(weekly.status(-1), "🍕 Pizza · Wednesday 18 Nov at 13:30");
         assert_eq!(state["-1"]["rsvps"], json!({}));
         assert_eq!(state["-1"]["voterNames"]["3"], "Cora");
         let lunch_time = at("2026-11-16T19:02:00Z");
@@ -687,6 +745,7 @@ mod tests {
         assert_eq!(method, "sendMessage");
         assert_eq!(poll["message_thread_id"], 7);
         assert!(poll["text"].as_str().unwrap().contains("Monday 23 Nov"));
+        assert_eq!(weekly.status(-1), "🍕 No votes yet in the weekly poll.");
         Ok(())
     }
 }

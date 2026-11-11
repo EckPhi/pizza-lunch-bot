@@ -38,6 +38,7 @@ Once the bot has started, type `/` in the group message field to see
 Telegram's command suggestions. Select the entry for your Pizza Lunch Bot.
 
 - `/weekly` starts the recurring pizza poll.
+- `/status` shows the leading day and its vote count, or the scheduled weekly lunch.
 - `/plan` creates a one-off availability poll. Add times separated by `|`.
 - `/lunch` creates a one-off RSVP poll. Add the date, time, and place.
 - `/help` shows examples. In a group you can also send `/help@your_bot`
